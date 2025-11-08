@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generic Web Scraper Interface</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar for the results box */
+        #results-area::-webkit-scrollbar {
+            width: 8px;
+        }
+        #results-area::-webkit-scrollbar-thumb {
+            background-color: #6366f1; /* Indigo 500 */
+            border-radius: 4px;
+        }
+        #results-area {
+            scrollbar-width: thin;
+            scrollbar-color: #6366f1 #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4 font-sans">
+
+    <div class="w-full max-w-4xl bg-white shadow-2xl rounded-xl p-8 space-y-6">
+        <header class="text-center">
+            <h1 class="text-3xl font-extrabold text-indigo-700">Universal Name Scraper</h1>
+            <p class="mt-2 text-gray-600">Enter the URL and a CSS Selector to extract names. The selector must target elements containing the person's name (e.g., `h2 a`, `.bio-link`, or `li span`).</p>
+            <div id="cors-warning" class="mt-4 p-3 bg-green-100 text-green-800 border border-green-300 rounded-lg text-sm font-medium">
+                ✅ **Server Backend Ready:** This tool now calls your FastAPI server on <code class="font-mono">http://localhost:8000/scrape</code>, resolving CORS issues!
+            </div>
+        </header>
+
+        <!-- Input Form -->
+        <div class="space-y-4">
+            <div>
+                <label for="url-input" class="block text-sm font-bold text-gray-700 mb-1">Target URL</label>
+                <input type="url" id="url-input" placeholder="e.g., https://example.com/team" value="https://example.com"
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+            </div>
+
+            <div>
+                <label for="selector-input" class="block text-sm font-bold text-gray-700 mb-1">CSS Selector for Names/Links</label>
+                <input type="text" id="selector-input" placeholder="e.g., .team-member-name a" value=".team-member-name a"
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+                <p class="mt-1 text-xs text-gray-500">Need help with the selector? Right-click the name on the target page and choose "Inspect".</p>
+            </div>
+
+            <button onclick="scrapeWebsite()" id="scrape-button"
+                    class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition duration-200 ease-in-out transform hover:scale-[1.01] focus:outline-none focus:ring-4 focus:ring-indigo-500 focus:ring-opacity-50">
+                Scrape Names (via FastAPI)
+            </button>
+        </div>
+
+        <!-- Status and Results Area -->
+        <div class="mt-6">
+            <h2 class="text-xl font-bold text-gray-700 border-b pb-2 mb-4">Extracted Names (<span id="name-count">0</span>)</h2>
+            <div id="status-message" class="text-center text-sm text-gray-500 py-2 hidden"></div>
+
+            <pre id="results-area"
+                 class="bg-gray-800 text-green-300 p-4 rounded-lg h-80 overflow-y-auto text-sm whitespace-pre-wrap border border-gray-700 shadow-inner">
+                Make sure your FastAPI server is running on port 8000, then click "Scrape Names".
+            </pre>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8000/scrape'; // Target the FastAPI endpoint
+        const MAX_RETRIES = 3;
+        const RETRY_DELAY = 1000;
+
+        const statusMessage = document.getElementById('status-message');
+        const resultsArea = document.getElementById('results-area');
+        const nameCount = document.getElementById('name-count');
+        const scrapeButton = document.getElementById('scrape-button');
+
+        // Helper function for exponential backoff
+        async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
+            try {
+                const response = await fetch(url, options);
+                if (!response.ok) {
+                    // Try to read the error detail from the server response
+                    let errorDetail = await response.text();
+                    try {
+                        const json = JSON.parse(errorDetail);
+                        errorDetail = json.detail || errorDetail;
+                    } catch (e) { /* Ignore parsing error if response is not JSON */ }
+                    throw new Error(`Server Error (${response.status}): ${errorDetail}`);
+                }
+                return response;
+            } catch (error) {
+                if (retries === 0) {
+                    throw error;
+                }
+                const delay = RETRY_DELAY * (MAX_RETRIES - retries + 1);
+                console.warn(`Fetch failed. Retrying in ${delay}ms... (${retries} retries left)`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                return fetchWithRetry(url, options, retries - 1);
+            }
+        }
+
+        function setStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            const baseClasses = 'text-center text-sm py-2 block';
+            const typeClasses = type === 'error' ? 'text-red-600 bg-red-50' : 'text-indigo-600 bg-indigo-50';
+            statusMessage.className = `${baseClasses} ${typeClasses}`;
+            statusMessage.classList.remove('hidden');
+        }
+
+        function resetUI() {
+            resultsArea.textContent = 'Make sure your FastAPI server is running on port 8000, then click "Scrape Names".';
+            nameCount.textContent = '0';
+            statusMessage.classList.add('hidden');
+            scrapeButton.disabled = false;
+            scrapeButton.textContent = 'Scrape Names (via FastAPI)';
+            scrapeButton.classList.remove('opacity-50');
+        }
+
+        async function scrapeWebsite() {
+            resetUI();
+            const url = document.getElementById('url-input').value.trim();
+            const selector = document.getElementById('selector-input').value.trim();
+
+            if (!url || !selector) {
+                setStatus('Please enter both a valid URL and a CSS selector.', 'error');
+                return;
+            }
+
+            // UI state management during fetching
+            scrapeButton.disabled = true;
+            scrapeButton.textContent = 'Awaiting Server Response...';
+            scrapeButton.classList.add('opacity-50');
+            setStatus(`Sending request to FastAPI server at ${API_URL} with URL: ${url}`);
+
+            try {
+                // Prepare the data to send to the FastAPI server
+                const dataToSend = { url, selector };
+
+                const response = await fetchWithRetry(API_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(dataToSend)
+                });
+
+                // The server returns a JSON array of names
+                const names = await response.json();
+                
+                if (names.length === 0) {
+                    setStatus(`Success! Server fetched page, but found 0 elements matching selector: "${selector}".`, 'error');
+                    resultsArea.textContent = 'No names found. The selector might be incorrect or the server might have been blocked.';
+                } else {
+                    // Display results
+                    const output = names.join('\n');
+                    resultsArea.textContent = output;
+                    nameCount.textContent = names.length;
+                    setStatus(`Successfully extracted ${names.length} names via FastAPI.`, 'success');
+                }
+
+            } catch (error) {
+                console.error("Client-side Fetch Error:", error);
+                const errorMessage = error.message.includes('Failed to fetch') 
+                    ? "Connection Error: Could not reach the FastAPI server. Is 'uvicorn main:app --reload' running?"
+                    : `API Error: ${error.message}`;
+
+                setStatus(errorMessage, 'error');
+                resultsArea.textContent = `*** ERROR ENCOUNTERED ***\n${errorMessage}\n\nPlease check your server's console for back-end errors.`;
+                nameCount.textContent = '0';
+            } finally {
+                // Reset UI state
+                scrapeButton.disabled = false;
+                scrapeButton.textContent = 'Scrape Names (via FastAPI)';
+                scrapeButton.classList.remove('opacity-50');
+            }
+        }
+    </script>
+
+</body>
+</html>

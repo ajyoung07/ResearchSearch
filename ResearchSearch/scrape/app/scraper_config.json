@@ -1,0 +1,20 @@
+[
+  {
+    "site_name": "Example Team Directory (2-Stage)",
+    "index_url": "https://example.com/team-directory",
+    
+    
+    "link_selector": {
+      "tag": "a", 
+      "class": "profile-link" 
+    },
+    
+    "detail_selectors": {
+      "name_tag": "h1", 
+      "name_class": "person-name", 
+      
+      "main_text_tag": "div",
+      "main_text_class": "profile-content-body" 
+    }
+  }
+]
