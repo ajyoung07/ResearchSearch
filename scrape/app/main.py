@@ -13,13 +13,16 @@ from pydantic import BaseModel, Field, HttpUrl
 from typing import List, Optional, Dict, Any
 import time
 import json
+import asyncio
 
 # NEW: Imports for Clustering
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA # Using PCA for 2D coordinate generation
 from sklearn.exceptions import ConvergenceWarning
+from sklearn.feature_extraction.text import TfidfVectorizer
 import warnings
+from urllib.parse import urljoin
 
 import redis
 import base64
@@ -42,137 +45,33 @@ r = redis.Redis(
     decode_responses=True
 )
 
-# --- Pydantic Models for Input Validation and Documentation ---
-    
+# 1. Define the input data model for the scrape request
 class ScrapeRequest(BaseModel):
     url: str
-    selector: str
-    
+    selector: str # This now targets the link to the bio page (e.g., a.person__image)
+
+# 2. Define the output data model for the research results
 class ResearchResult(BaseModel):
     name: str
+    # research_summary now holds the person's extracted research areas for embedding
     research_summary: str
-    sources: List[Dict[str, str]]
-    # Field to hold the assigned cluster ID
+    sources: List[Dict[str, str]] # Holds the bio URL
+    # Field to hold the assigned cluster ID (None: Needs clustering, >=0: Clustered, -1: Embedding Failed, -2: API Error, -3: General Failure)
     cluster_id: Optional[int] = None 
-    # Field to hold the common co-authors
+    # Field to hold the common co-authors (now always None)
     common_co_authors: Optional[str] = None
-    # NEW: 2D coordinates for the relationship map visualization (from PCA)
+    # 2D coordinates for the relationship map visualization (from PCA)
     x_coord: Optional[float] = None
     y_coord: Optional[float] = None
-    
-def generate_embedding(text: str, client: genai.Client) -> Optional[List[float]]:
-    """Generates an embedding vector for a given text using text-embedding-004."""
-    try:
-        # Use a reliable text embedding model
-        response = client.models.embed_content(
-            model='text-embedding-004',
-            content=text,
-            task_type='CLUSTERING',
-        )
-        return response.embedding
-    except APIError as e:
-        print(f"Embedding API Error for text: {text[:50]}... Error: {e}")
-        return None
-    except Exception as e:
-        print(f"Unexpected Embedding Error: {e}")
-        return None
-    
-    
-def find_research_papers(name: str, client: genai.Client) -> ResearchResult:
-    """
-    Calls the Gemini API using the official Python SDK with Google Search grounding.
-    """
-    
-    # Prompting for co-authors and summary
-    prompt = (
-        f"Find the three most important or recent research papers published by the academic or professional named '{name}'. "
-        f"Also, identify their 3 most common co-authors (or known collaborators). "
-        f"Format the response such that the first line contains ONLY the co-authors, prefixed by 'COAUTHORS:', separated by commas. "
-        f"The subsequent lines should contain the research summary (title, year, and focus) formatted as a concise list or paragraph."
-    )
 
-    # Define configuration for the API call
-    config = types.GenerateContentConfig(
-        tools=[{"google_search": {}}],
-        system_instruction="You are a research assistant. Provide the response exactly as requested. List the co-authors on the first line separated by commas, and then provide the research summary. State clearly if no information is found for either part."
-    )
-    
-    # Create the contents list
-    contents = [types.Content(parts=[types.Part.from_text(text=prompt)])]
+# 3. Initialize the FastAPI app
+app = FastAPI(
+    title="Specialized Two-Level Scraper and Research Area Clusterer API",
+    description="Scrapes bio pages for research areas and clusters them using Gemini embeddings."
+)
 
-    try:
-        # Call the Gemini API
-        response = client.models.generate_content(
-            model='gemini-2.5-flash-preview-09-2025',
-            contents=contents,
-            config=config
-        )
-
-        # Parse the response text
-        text = response.text or 'No text generated.'
-        
-        # Attempt to parse co-authors and summary based on the requested format
-        co_authors = None
-        summary_text = text
-        
-        if text.lower().startswith("coauthors:"):
-            lines = text.split('\n', 1)
-            co_author_line = lines[0]
-            
-            # Simple extraction after the prefix (case-insensitive)
-            match = re.search(r'coauthors:(.*)', co_author_line, re.IGNORECASE)
-            if match:
-                co_authors = match.group(1).strip()
-
-            # The rest of the text is the summary
-            summary_text = lines[1].strip() if len(lines) > 1 else "No detailed summary provided."
-        
-        # Extract grounding sources from the SDK response object
-        sources = []
-        if response.candidates and response.candidates[0].grounding_metadata:
-            grounding_metadata = response.candidates[0].grounding_metadata
-            
-            if grounding_metadata.grounding_attributions:
-                sources = [
-                    {"uri": attr.web.uri, "title": attr.web.title}
-                    for attr in grounding_metadata.grounding_attributions
-                    if attr.web and attr.web.uri and attr.web.title
-                ]
-        
-        return ResearchResult(
-            name=name,
-            research_summary=summary_text,
-            sources=sources,
-            common_co_authors=co_authors
-        )
-
-    except APIError as e:
-        # Handle API specific errors (e.g., rate limits, invalid key)
-        return ResearchResult(
-            name=name,
-            research_summary=f"Gemini API Error (Check API Key and Rate Limits): {e}",
-            sources=[],
-            cluster_id=-2 # Special ID for API failure
-        )
-    except Exception as e:
-        # Handle general unexpected errors
-        return ResearchResult(
-            name=name,
-            research_summary=f"An unexpected error occurred during Gemini call: {e}",
-            sources=[],
-        )
-    
-# API Routes
-
-app = FastAPI()
-
-origins = [
-    "http://localhost",
-    "http://localhost:8000",
-    # You might need to add the actual domain/IP where your client is hosted
-    "*" # Using '*' for maximum flexibility in this demo environment
-]
-
+# 4. Configure CORS middleware
+origins = ["*"] 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -181,10 +80,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.post("/scrape", response_model=List[str])
-async def scrape_website(request_data: ScrapeRequest):
+def fetch_bio_page(bio_url: str) -> Optional[Dict[str, str]]:
     """
-    Fetches the given URL and extracts text content using the provided CSS selector.
+    Synchronous function to fetch a single bio page and extract name and research areas.
+    The research area extraction logic is hardcoded for the user's specified website structure.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(bio_url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # 1. Extract Name (Assumes H1 or H2 holds the person's name on the bio page)
+        name_element = soup.select_one('h1') or soup.select_one('h2')
+        name = name_element.get_text(strip=True) if name_element else "Unknown Person"
+        
+        # 2. Extract Research Areas
+        research_areas_text = ""
+        
+        # Hardcoded Selector: article.research-areas-tags > ul > a
+        # We look for the containing article, then the unordered list, then the links
+        ul_element = soup.select_one('article.research-areas-tags ul')
+        
+        if ul_element:
+            # Select all anchor tags within that specific unordered list
+            areas = [a.get_text(strip=True) for a in ul_element.select('a')]
+            # Join areas with a distinct separator for vectorization
+            research_areas_text = " | ".join(areas) 
+            
+        return {
+            "name": name,
+            "research_areas": research_areas_text,
+            "bio_url": bio_url
+        }
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching bio page {bio_url}: {e}")
+        return None
+    except Exception as e:
+        print(f"General error processing bio page {bio_url}: {e}")
+        return None
+            
+
+@app.post("/scrape", response_model=List[ResearchResult])
+async def scrape_and_find_research(request_data: ScrapeRequest):
+    """
+    1. Scrapes the main page for bio links using the selector.
+    2. Concurrently scrapes each bio link for Name and Research Areas.
+    3. Generates TF-IDF vectors from the research areas, performs PCA, and clusters the results.
+    4. Caches and returns the results.
     """
     url = request_data.url
     selector = request_data.selector
@@ -193,124 +140,164 @@ async def scrape_website(request_data: ScrapeRequest):
         raise HTTPException(status_code=400, detail="URL and selector must be provided.")
 
     # --- Caching Check ---
-    cache_key = f"research_map:{url}:{selector}"
+    cache_key = f"research_map_areas:{url}:{selector}" 
+    
     cached_results_json = r.get(cache_key)
     if cached_results_json:
         print("Cache hit! Returning cached results.")
-        # Deserialize JSON back into Pydantic models
         try:
             cached_data = json.loads(cached_results_json)
-            return [ResearchResult(**data) for data in cached_data]
+            safe_cached_data = []
+            for data in cached_data:
+                # Ensure cluster_id is present for Pydantic model validation
+                if 'cluster_id' not in data:
+                    data['cluster_id'] = None
+                safe_cached_data.append(data)
+            return [ResearchResult(**data) for data in safe_cached_data]
         except Exception as e:
-            # If deserialization fails (e.g., cache data is corrupted or structure changed), re-run
             print(f"Error deserializing cached data: {e}. Re-running computation.")
-            # Fall through to computation if deserialization fails
     else:
         print("Cache miss. Running computation.")
-        
-    # Use a common user-agent header to avoid being blocked by simple checks
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+            
+    # --- Start Computation (Cache Miss) ---
     
-    # 4. Fetch the content using requests (the magic that bypasses CORS!)
-    response = requests.get(url, headers=headers, timeout=15)
-    response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-    # 5. Parse the HTML with BeautifulSoup
-    soup = BeautifulSoup(response.content, 'html.parser')
-    
-    # 6. Find all elements matching the selector
-    elements = soup.select(selector)
-    if not elements:
-        # Return an empty list if no elements are found
-        return []
-    names = []
-    
-    all_research_results: List[ResearchResult] = []
-    for el in elements:
-        # Extract text content, clean up whitespace, and remove excessive newlines/tabs
-        text = el.get_text(strip=True)
-        if text:
-            # Further cleanup: replace multiple spaces with a single space
-            cleaned_text = re.sub(r'\s+', ' ', text)
-            names.append(cleaned_text)
-            
-    for name in names:
-            print(f"Finding research for: {name}")
-            result = find_research_papers(name, client)
-            all_research_results.append(result)
-            
-    # Filter results that have a valid summary for embedding
-    clusterable_results = []
-    original_indices = [] # Tracks the index in all_research_results
-    
-    for i, res in enumerate(all_research_results):
-        # Check for valid summary text (not a failure message)
-        if res.research_summary and res.cluster_id is None:
-            clusterable_results.append(res)
-            original_indices.append(i)
-    if len(clusterable_results) >= N_CLUSTERS:
-        print(f"Generating embeddings for {len(clusterable_results)} items...")
-        
-        embeddings_list = []
-        final_indices = [] # Map back from the embedding list to the original results list
-        
-        for i, res in zip(original_indices, clusterable_results):
-            embedding = generate_embedding(res.research_summary, client)
-            if embedding:
-                embeddings_list.append(embedding)
-                final_indices.append(i) # Store the index of the successful embedding
-            else:
-                all_research_results[i].cluster_id = -1 # Indicate failure to embed
-        if embeddings_list:
-            X = np.array(embeddings_list)
-            
-            # Ensure number of clusters is not greater than the number of samples
-            k = min(N_CLUSTERS, X.shape[0])
-            
-            # --- A. DIMENSIONALITY REDUCTION (PCA) ---
-            print(f"Performing PCA to reduce to 2D coordinates...")
-            pca = PCA(n_components=2)
-            X_2d = pca.fit_transform(X) # X_2d has shape (N, 2)
-            
-            # --- B. CLUSTERING (K-Means for Color Coding) ---
-            print(f"Performing K-Means clustering with k={k} for coloring...")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=ConvergenceWarning)
-                kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
-                kmeans.fit(X) # Clustering still performed on high-dimensional data for better results
-            
-            # --- C. ASSIGN RESULTS ---
-            # Assign cluster labels and 2D coordinates back to the original results
-            for idx, cluster_label in enumerate(kmeans.labels_):
-                original_index = final_indices[idx]
-                
-                # Assign cluster ID (for color)
-                all_research_results[original_index].cluster_id = int(cluster_label)
-                
-                # Assign 2D coordinates (for map position)
-                all_research_results[original_index].x_coord = float(X_2d[idx, 0])
-                all_research_results[original_index].y_coord = float(X_2d[idx, 1])
-        
-    else:
-        print(f"Skipping clustering: Only {len(clusterable_results)} items available. Need at least {N_CLUSTERS}.")
-        
     try:
-        # Serialize the list of ResearchResult objects to JSON
-        results_to_cache = [res.model_dump() for res in all_research_results]
-        results_json = json.dumps(results_to_cache)
-        r.set(cache_key, results_json, ex=CACHE_EXPIRATION_SECONDS)
-        print(f"Stored results in cache key: {cache_key}")
-    except Exception as e:
-        print(f"Error storing results in cache: {e}")
-    return all_research_results
+        # 1. Level 1 Scraping: Get Bio URLs
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(None, requests.get, url, {'headers': headers, 'timeout': 15})
+        response.raise_for_status()
 
-    # except requests.exceptions.RequestException as e:
-    #     # Handle network-related errors (DNS failure, connection refused, timeout)
-    #     raise HTTPException(status_code=502, detail=f"Failed to fetch external URL: {e}")
-    # except Exception as e:
-    #     # Handle all other parsing or unexpected errors
-    #     raise HTTPException(status_code=500, detail=f"An internal error occurred during scraping: {e}")
+        soup = BeautifulSoup(response.content, 'html.parser')
+        bio_link_elements = soup.select(selector)
+
+        # Extract bio URLs (cap at 10)
+        bio_urls = []
+        url_set = set() 
+        for el in bio_link_elements:
+            url_path = el.get('href')
+            if url_path:
+                # Use urljoin to correctly handle relative paths
+                full_url = urljoin(url, url_path)
+                
+                if full_url not in url_set:
+                    bio_urls.append(full_url)
+                    url_set.add(full_url)
+
+        if not bio_urls:
+            all_research_results = []
+            r.set(cache_key, json.dumps([]), ex=CACHE_EXPIRATION_SECONDS)
+            return all_research_results
+
+        # 2. Level 2 Scraping: Get Research Areas concurrently
+        print(f"Starting concurrent bio page fetching for {len(bio_urls)} people...")
+        
+        tasks = [loop.run_in_executor(None, fetch_bio_page, bio_url) for bio_url in bio_urls]
+        scraped_data: List[Optional[Dict[str, str]]] = await asyncio.gather(*tasks)
+        print("Finished concurrent bio page scraping.")
+        
+        # 3. Prepare ResearchResult objects
+        prepared_results: List[ResearchResult] = []
+        for data in scraped_data:
+            # ONLY include results where the bio page was fetched and research areas were successfully extracted.
+            if data and data['research_areas']:
+                prepared_results.append(
+                    ResearchResult(
+                        name=data['name'],
+                        research_summary=data['research_areas'], 
+                        sources=[{"uri": data['bio_url'], "title": f"Source: {data['name']}'s Bio Page"}],
+                        common_co_authors=None,
+                        cluster_id=None
+                    )
+                )
+
+        all_research_results = prepared_results
+        
+        # 4. Clustering and PCA Logic
+        
+        clusterable_results = all_research_results
+        original_indices = list(range(len(all_research_results)))
+        
+        # Collect summaries for vectorization
+        summaries = [res.research_summary for res in clusterable_results]
+        
+        # --- A. TF-IDF VECTORIZATION ---
+        if len(summaries) > 0:
+            print(f"Generating TF-IDF vectors for {len(summaries)} items...")
+            
+            # Initialize TF-IDF Vectorizer
+            vectorizer = TfidfVectorizer(
+                stop_words='english', 
+                ngram_range=(1, 2), # Use single words and two-word phrases
+                max_df=0.85, 
+                min_df=1     
+            )
+            
+            # Transform summaries into a dense matrix X for PCA/KMeans
+            X_sparse = vectorizer.fit_transform(summaries)
+            X = X_sparse.toarray()
+            
+            # Check if TF-IDF generated a meaningful feature set
+            if X.shape[1] > 0:
+                
+                # --- B. DIMENSIONALITY REDUCTION (PCA) ---
+                print(f"Performing PCA to reduce to 2D coordinates...")
+                pca = PCA(n_components=2)
+                X_2d = pca.fit_transform(X)
+                
+                # --- C. CLUSTERING (K-Means for Color Coding) ---
+                if X.shape[0] >= N_CLUSTERS: # Run K-Means only if we have enough points
+                    k = N_CLUSTERS
+                    print(f"Performing K-Means clustering with k={k} for coloring...")
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", category=ConvergenceWarning)
+                        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+                        kmeans.fit(X)
+                    
+                    # --- D. ASSIGN RESULTS (K-Means ran) ---
+                    for idx, cluster_label in enumerate(kmeans.labels_):
+                        original_index = original_indices[idx]
+                        all_research_results[original_index].cluster_id = int(cluster_label)
+                        all_research_results[original_index].x_coord = float(X_2d[idx, 0])
+                        all_research_results[original_index].y_coord = float(X_2d[idx, 1])
+                
+                else:
+                    # --- D. ASSIGN RESULTS (K-Means skipped, but PCA ran) ---
+                    print(f"Skipping K-Means: Only {X.shape[0]} items available. Assigning default cluster 0 for visualization.")
+                    # Assign cluster_id = 0 and coordinates for visualization
+                    for idx in range(X.shape[0]):
+                        original_index = original_indices[idx]
+                        all_research_results[original_index].cluster_id = 0 # Default cluster 0
+                        all_research_results[original_index].x_coord = float(X_2d[idx, 0])
+                        all_research_results[original_index].y_coord = float(X_2d[idx, 1])
+            else:
+                 print("TF-IDF generated an empty feature matrix. Skipping clustering.")
+                 for i in original_indices:
+                     all_research_results[i].cluster_id = -1 # Indicate failure to vectorize
+            
+        else:
+            print(f"Skipping clustering: No valid summaries found after scraping.")
+            for i in original_indices:
+                all_research_results[i].cluster_id = None 
+
+        # --- Caching Storage ---
+        try:
+            results_to_cache = [res.model_dump() for res in all_research_results]
+            results_json = json.dumps(results_to_cache)
+            r.set(cache_key, results_json, ex=CACHE_EXPIRATION_SECONDS)
+            print(f"Stored results in cache key: {cache_key}")
+        except Exception as e:
+            print(f"Error storing results in cache: {e}")
+
+        return all_research_results
+
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch external URL: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An internal error occurred during processing: {e}")
 
 @app.get("/health")
 def health_check():

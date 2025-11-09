@@ -41,31 +41,30 @@
 
     <div class="w-full max-w-5xl bg-white shadow-2xl rounded-xl p-8 space-y-6">
         <header class="text-center">
-            <h1 class="text-3xl font-extrabold text-indigo-700">Research Paper Finder & Clustering</h1>
-            <p class="mt-2 text-gray-600">Scrape names, find research (including **co-authors**), and cluster people by interest using Gemini Embeddings and PCA.</p>
-            <div id="cors-warning" class="mt-4 p-3 bg-green-100 text-green-800 border border-green-300 rounded-lg text-sm font-medium">
-                ✅ Similarity Map Activated: Proximity now reflects research similarity!
-            </div>
+            <h1 class="text-3xl font-extrabold text-indigo-700">Specialized Research Area Clusterer</h1>
+            <p class="mt-2 text-gray-600">Scrape bio links, find research areas, and cluster people by interest using TF-IDF Vectorization and PCA.</p>
         </header>
 
         <!-- Input Form -->
         <div class="space-y-4 md:flex md:space-y-0 md:space-x-4">
             <div class="flex-1">
-                <label for="url-input" class="block text-sm font-bold text-gray-700 mb-1">Target URL</label>
-                <input type="url" id="url-input" placeholder="e.g., https://academic.com/faculty" value="https://example.com"
+                <label for="url-input" class="block text-sm font-bold text-gray-700 mb-1">Target URL (Main List)</label>
+                <input type="url" id="url-input" placeholder="e.g., https://academic.com/faculty-list" value="https://example.com"
                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
             </div>
 
             <div class="flex-1">
-                <label for="selector-input" class="block text-sm font-bold text-gray-700 mb-1">CSS Selector for Names</label>
-                <input type="text" id="selector-input" placeholder="e.g., .faculty-member h3" value=".faculty-member h3"
+                <label for="selector-input" class="block text-sm font-bold text-gray-700 mb-1">CSS Selector for Bio Links</label>
+                <!-- UPDATED PLACEHOLDER for new required selector -->
+                <input type="text" id="selector-input" placeholder="e.g., a.person__image" value="a.person__image"
                        class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+                <p class="text-xs text-gray-500 mt-1">This selector must target the elements containing the link to the bio page.</p>
             </div>
         </div>
 
         <button onclick="scrapeAndFindResearch()" id="scrape-button"
                 class="w-full py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-lg shadow-md transition duration-200 ease-in-out transform hover:scale-[1.005] focus:outline-none focus:ring-4 focus:ring-indigo-500 focus:ring-opacity-50">
-            Start Research Search & Mapping (Max 10 People)
+            Start Two-Level Scrape & Interest Mapping
         </button>
 
         <!-- Visualization Area -->
@@ -78,7 +77,7 @@
 
         <!-- Status and Results Area -->
         <div class="mt-6">
-            <h2 class="text-xl font-bold text-gray-700 border-b pb-2 mb-4">Research Findings (<span id="name-count">0</span> People)</h2>
+            <h2 class="text-xl font-bold text-gray-700 border-b pb-2 mb-4">Research Area Findings (<span id="name-count">0</span> People)</h2>
             <div id="status-message" class="text-center text-sm text-gray-500 py-2 hidden"></div>
 
             <div id="results-container" class="bg-gray-100 p-4 rounded-lg space-y-6">
@@ -134,7 +133,7 @@
             nameCount.textContent = '0';
             statusMessage.classList.add('hidden');
             scrapeButton.disabled = false;
-            scrapeButton.textContent = 'Start Research Search & Mapping (Max 10 People)';
+            scrapeButton.textContent = 'Start Two-Level Scrape & Interest Mapping';
             scrapeButton.classList.remove('opacity-50');
             
             // Clear visualization area
@@ -275,7 +274,7 @@
             localStorage.setItem('lastResults', JSON.stringify(results));
 
             if (results.length === 0) {
-                resultsContainer.innerHTML = '<p class="text-center text-gray-500 italic p-4">No names were extracted from the URL using the provided selector.</p>';
+                resultsContainer.innerHTML = '<p class="text-center text-gray-500 italic p-4">No bio links were extracted from the URL using the provided selector.</p>';
                 return;
             }
 
@@ -301,7 +300,7 @@
                 if (item.cluster_id !== null && item.cluster_id !== undefined) {
                     const clusterPill = document.createElement('span');
                     let colorClass = 'bg-gray-200 text-gray-800';
-                    let pillText = 'No Map Position';
+                    let pillText = 'Unclassified';
 
                     // Assign colors based on cluster ID
                     if (item.cluster_id >= 0) {
@@ -309,11 +308,14 @@
                         colorClass = clusterColorMap[clusterIndex];
                         pillText = `Interest Group ${item.cluster_id + 1}`;
                     } else if (item.cluster_id === -1) {
-                        pillText = 'Embedding Failed';
+                        pillText = 'Embedding Failed (Check API)';
                         colorClass = 'bg-red-200 text-red-800';
                     } else if (item.cluster_id === -2) {
-                        pillText = 'API Failed';
+                        pillText = 'API Failed (Quota/Key)';
                         colorClass = 'bg-red-200 text-red-800';
+                    } else if (item.cluster_id === -3) {
+                        pillText = 'No Research Areas Found';
+                        colorClass = 'bg-yellow-200 text-yellow-800';
                     }
                     
                     clusterPill.textContent = pillText;
@@ -323,8 +325,8 @@
 
                 card.appendChild(nameHeader);
 
-                // Display Common Co-Authors
-                if (item.common_co_authors && item.common_co_authors.trim() !== "" && item.common_co_authors.toLowerCase() !== "no co-authors found.") {
+                // Display Common Co-Authors (now always empty/none)
+                if (item.common_co_authors && item.common_co_authors.trim() !== "") {
                     const coAuthorsDiv = document.createElement('div');
                     coAuthorsDiv.className = 'mb-4 border-l-4 border-indigo-300 pl-3 py-1';
                     
@@ -341,17 +343,23 @@
                     card.appendChild(coAuthorsDiv);
                 }
 
-                // Summary
+                // Summary (now Research Areas)
                 const summaryParagraph = document.createElement('p');
                 summaryParagraph.className = 'text-gray-700 whitespace-pre-wrap mb-4';
-                summaryParagraph.textContent = item.research_summary || 'No research papers found or API error.';
+                
+                if (item.cluster_id === -3) {
+                     summaryParagraph.textContent = item.research_summary; // Show the specific failure message
+                } else {
+                     summaryParagraph.innerHTML = `<strong>Research Areas:</strong> ${item.research_summary.split(' | ').join(', ')}`;
+                }
+               
                 card.appendChild(summaryParagraph);
 
                 // Sources
                 if (item.sources && item.sources.length > 0) {
                     const sourcesTitle = document.createElement('p');
                     sourcesTitle.className = 'text-sm font-medium text-gray-500 mt-2';
-                    sourcesTitle.textContent = 'Grounding Sources:';
+                    sourcesTitle.textContent = 'Source:';
                     card.appendChild(sourcesTitle);
 
                     const sourcesList = document.createElement('ul');
@@ -389,9 +397,9 @@
 
             // UI state management during fetching
             scrapeButton.disabled = true;
-            scrapeButton.textContent = 'Processing... Finding Research, Generating Embeddings, and Mapping Coordinates...';
+            scrapeButton.textContent = 'Processing... Fetching Bio Pages, Generating Embeddings, and Mapping Coordinates...';
             scrapeButton.classList.add('opacity-50');
-            setStatus(`Starting scrape, research lookup, and mapping for URL: ${url}`);
+            setStatus(`Starting two-level scrape and mapping for URL: ${url}`);
 
             try {
                 const dataToSend = { url, selector };
@@ -415,7 +423,7 @@
                 const maxClusterId = researchResults.reduce((max, r) => r.cluster_id > max ? r.cluster_id : max, -1);
                 const clusterCount = maxClusterId >= 0 ? maxClusterId + 1 : 0;
                 
-                setStatus(`Finished processing ${researchResults.length} names. Map shows ${clusterCount} major interest groups.`, 'success');
+                setStatus(`Finished processing ${researchResults.length} people. Map shows ${clusterCount} major interest groups.`, 'success');
 
             } catch (error) {
                 console.error("Client-side Fetch Error:", error);
@@ -428,7 +436,7 @@
             } finally {
                 // Reset UI state
                 scrapeButton.disabled = false;
-                scrapeButton.textContent = 'Start Research Search & Mapping (Max 10 People)';
+                scrapeButton.textContent = 'Start Two-Level Scrape & Interest Mapping';
                 scrapeButton.classList.remove('opacity-50');
             }
         }
