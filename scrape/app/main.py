@@ -2,16 +2,10 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 import requests
-import re
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError 
 
-from dotenv import load_dotenv
 import os
 from pydantic import BaseModel, Field, HttpUrl
 from typing import List, Optional, Dict, Any
-import time
 import json
 import asyncio
 
@@ -25,15 +19,6 @@ import warnings
 from urllib.parse import urljoin
 
 import redis
-import base64
-
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-SCEMANTIC_SCHOLAR_API = "http://api.semanticscholar.org/graph/v1/paper/search/bulk"
 
 N_CLUSTERS = 3
 
@@ -67,7 +52,7 @@ class ResearchResult(BaseModel):
 # 3. Initialize the FastAPI app
 app = FastAPI(
     title="Specialized Two-Level Scraper and Research Area Clusterer API",
-    description="Scrapes bio pages for research areas and clusters them using Gemini embeddings."
+    description="Scrapes bio pages for research areas and clusters them using Tf-IDF Vectorizer."
 )
 
 # 4. Configure CORS middleware
